@@ -21,11 +21,17 @@ def run_query(sql, params=()):
         conn.close()
 
 
-def load_members(search_name="", only_missing=False):
+def load_members(search_name="", only_missing=False, grade=None):
     """이름에 검색어가 포함된 회원을 조회하며, 빈 검색어는 전체 조회합니다."""
     sql = """
         SELECT userID, userName, addr, birthYear, mDate,
-               COALESCE(email, '미등록') AS email
+               COALESCE(email, '미등록') AS email,
+               CASE memberGrade
+                   WHEN 0 THEN 'BASIC'
+                   WHEN 1 THEN 'SILVER'
+                   WHEN 2 THEN 'GOLD'
+                   ELSE '알 수 없음'
+               END AS memberGrade
         FROM userTBL
         """
     conditions = []
@@ -35,6 +41,9 @@ def load_members(search_name="", only_missing=False):
         params.append(f"%{search_name}%")
     if only_missing:
         conditions.append("email IS NULL")
+    if grade is not None:
+        conditions.append("memberGrade = %s")
+        params.append(grade)
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
     sql += " ORDER BY userID"
@@ -54,6 +63,26 @@ def load_purchases(user_id):
     )
 
 
+def load_deliveries(status=None):
+    sql = """
+        SELECT num, userID, prodName, price, amount,
+               price * amount AS totalPrice,
+               CASE deliveryStatus
+                   WHEN 0 THEN '주문접수'
+                   WHEN 1 THEN '배송중'
+                   WHEN 2 THEN '배송완료'
+                   ELSE '알 수 없음'
+               END AS deliveryLabel
+        FROM buyTBL
+    """
+    params = ()
+    if status is not None:
+        sql += " WHERE deliveryStatus = %s"
+        params = (status,)
+    sql += " ORDER BY num"
+    return run_query(sql, params)
+
+
 def load_purchase_ranking():
     # 구매 기록을 회원별로 묶어 구매 건수와 총액을 계산하고 총액이 큰 순서로 조회합니다.
     return run_query(
@@ -70,11 +99,14 @@ def load_purchase_ranking():
 st.subheader("회원 목록 · 이름 검색")
 search_name = st.text_input("회원 이름 검색", placeholder="예: 김")
 only_missing = st.checkbox("이메일 미등록 회원만")
+grade_options = {"전체": None, "BASIC": 0, "SILVER": 1, "GOLD": 2}
+selected_grade = st.selectbox("회원등급", list(grade_options))
+grade = grade_options[selected_grade]
 
 
 try:
     all_members = load_members()
-    members = load_members(search_name, only_missing) if search_name or only_missing else all_members
+    members = load_members(search_name, only_missing, grade) if search_name or only_missing or grade is not None else all_members
     email_counts = run_query(
         """SELECT COUNT(*) AS total, COUNT(email) AS registered,
                   COUNT(*) - COUNT(email) AS missing FROM userTBL"""
@@ -130,3 +162,24 @@ st.dataframe(
 )
 if not ranking:
     st.info("구매 기록이 없습니다.")
+
+st.subheader("배송상태별 구매 내역")
+delivery_options = {"전체": None, "주문접수": 0, "배송중": 1, "배송완료": 2}
+selected_delivery = st.selectbox("배송상태", list(delivery_options))
+try:
+    deliveries = load_deliveries(delivery_options[selected_delivery])
+except Exception as exc:
+    st.error("배송상태 조회에 실패했습니다. buyTBL의 deliveryStatus 열을 확인하세요.")
+    st.caption(f"오류 유형: {type(exc).__name__}")
+    st.stop()
+
+st.metric("배송 조회 건수", len(deliveries))
+st.metric("배송 조회 구매금액 합계", sum(row["totalPrice"] for row in deliveries))
+st.dataframe(
+    deliveries,
+    column_order=["num", "userID", "prodName", "price", "amount", "totalPrice", "deliveryLabel"],
+    hide_index=True,
+    use_container_width=True,
+)
+if not deliveries:
+    st.info("선택한 배송상태의 구매 내역이 없습니다.")
